@@ -18,12 +18,15 @@ namespace Eldorado.Desktop;
 
 public partial class MainWindow : Window
 {
+    private readonly bool previewMode;
+    private sealed record DeliveryChoice(string Value, string Label);
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(30) };
     private readonly SemaphoreSlim operation = new(1, 1);
-    private readonly DispatcherTimer pollTimer = new() { Interval = TimeSpan.FromSeconds(60) };
+    private readonly DispatcherTimer pollTimer = new() { Interval = TimeSpan.FromSeconds(15) };
     private readonly LocalStore store;
-    private readonly Forms.NotifyIcon tray;
+    private readonly Forms.NotifyIcon? tray;
     private SellerApi? api;
+    private ShopPoller? poller;
     private Credentials? credentials;
     private List<Order> orders = new();
     private List<Offer> offers = new();
@@ -31,18 +34,24 @@ public partial class MainWindow : Window
     private bool quitting;
     private bool ready;
     private bool working;
-    private int failedPolls;
+    private bool suppressRequestSelection;
+    private BoostRequest? quoteRequest;
     private (string Stream, string Id)? notificationTarget;
 
-    public MainWindow()
+    public MainWindow(bool previewMode = false)
     {
+        this.previewMode = previewMode;
         InitializeComponent();
-        string dataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EldoradoShop");
+        string dataFolder = previewMode
+            ? Path.Combine(Path.GetTempPath(), "EldoradoPreview", Guid.NewGuid().ToString("N"))
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EldoradoShop");
         Directory.CreateDirectory(dataFolder);
         store = new LocalStore(Path.Combine(dataFolder, "shop.db"));
+        if (!previewMode)
+        {
         tray = new Forms.NotifyIcon
         {
-            Icon = System.Drawing.SystemIcons.Application,
+            Icon = new System.Drawing.Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "app.ico")),
             Text = "Eldorado · Quản lý shop",
             Visible = true
         };
@@ -53,17 +62,59 @@ public partial class MainWindow : Window
         tray.ContextMenuStrip = menu;
         tray.DoubleClick += (_, _) => Dispatcher.Invoke(RestoreWindow);
         tray.BalloonTipClicked += (_, _) => Dispatcher.Invoke(OpenNotification);
+        }
         QuoteCurrency.ItemsSource = SellerApi.Currencies;
-        QuoteDelivery.ItemsSource = SellerApi.DeliveryTimes;
+        QuoteDelivery.ItemsSource = SellerApi.DeliveryTimes.Select(value => new DeliveryChoice(value, DeliveryLabel(value))).ToList();
+        QuoteDelivery.DisplayMemberPath = nameof(DeliveryChoice.Label);
+        QuoteDelivery.SelectedValuePath = nameof(DeliveryChoice.Value);
         QuoteCurrency.SelectedItem = "USD";
         QuoteDelivery.SelectedIndex = 0;
-        pollTimer.Tick += async (_, _) => await RunAsync(SyncAllAsync);
+        pollTimer.Tick += async (_, _) => await PollStreamsAsync();
         ready = true;
         OrdersNav.IsChecked = true;
     }
 
+    public void LoadPreviewData()
+    {
+        if (!previewMode) throw new InvalidOperationException("Sample data requires preview mode.");
+        var now = new DateTimeOffset(2026, 11, 6, 14, 32, 8, TimeSpan.FromHours(7));
+        requests = new List<BoostRequest>
+        {
+            new("a340c101-4931-41bf-9f02-000000000001", "Valorant", "Rank Boost", "MinhAnh_92", now.AddMinutes(-1)),
+            new("a340c101-4931-41bf-9f02-000000000002", "Roblox", "Nhiệm vụ", "HuyGaming", now.AddMinutes(-3)),
+            new("a340c101-4931-41bf-9f02-000000000003", "Genshin Impact", "Khám phá bản đồ", "Luna_07", now.AddMinutes(-6)),
+            new("a340c101-4931-41bf-9f02-000000000004", "League of Legends", "Rank Boost", "AlexNguyen", now.AddMinutes(-9)),
+            new("a340c101-4931-41bf-9f02-000000000005", "Roblox", "Luyện cấp", "BearCloud", now.AddMinutes(-12)),
+            new("a340c101-4931-41bf-9f02-000000000006", "Valorant", "Net Wins", "KayTran", now.AddMinutes(-18))
+        };
+        RequestsGrid.ItemsSource = requests;
+        RequestsGrid.SelectedIndex = 0;
+        QuotePrice.Text = "18.50";
+        QuoteCurrency.SelectedItem = "USD";
+        QuoteDelivery.SelectedValue = "Day2";
+        RequestsCountText.Text = "6";
+        OrdersCountText.Text = "3";
+        LastBoostSyncText.Text = "14:32:08";
+        BoostNav.IsChecked = true;
+        PageHint.Text = "Dữ liệu minh họa · giao diện mẫu để xem trước khi kết nối shop.";
+        RequestContent.Text = "Dữ liệu minh họa\nRank hiện tại: Gold 2 → Mục tiêu: Platinum 1\nMáy chủ: Asia · Chế độ: Solo\nYêu cầu thêm: hoàn thành trong 2 ngày, báo trước khi bắt đầu.";
+        StatusText.Text = "Dữ liệu minh họa · 6 yêu cầu cày thuê · tự kiểm tra mỗi 15 giây khi kết nối shop thật";
+    }
+
+    private static string DeliveryLabel(string value)
+    {
+        if (value.StartsWith("Minute", StringComparison.Ordinal)) return value[6..] + " phút";
+        if (value.StartsWith("Hour", StringComparison.Ordinal)) return value[4..] + " giờ";
+        if (value.StartsWith("Day", StringComparison.Ordinal)) return value[3..] + " ngày";
+        return value;
+    }
+
     private async void WindowLoaded(object sender, RoutedEventArgs e)
     {
+        if (previewMode)
+        {
+            return;
+        }
         await RunAsync(async () =>
         {
             credentials = CredentialStore.Load();
@@ -75,6 +126,7 @@ public partial class MainWindow : Window
             ClientIdInput.Text = credentials.ClientId;
             CredentialHint.Text = "Đã lưu secret. Để trống ô secret để tiếp tục dùng thông tin hiện tại.";
             CreateApi();
+            pollTimer.Start();
             await SyncAllAsync();
         });
         if (api is not null) pollTimer.Start();
@@ -83,6 +135,7 @@ public partial class MainWindow : Window
     private void CreateApi()
     {
         api = new SellerApi(http, () => Task.FromResult(credentials ?? throw new InvalidOperationException("Cần kết nối shop trước.")));
+        poller = new ShopPoller(api);
     }
 
     private async Task RunAsync(Func<Task> action)
@@ -97,17 +150,13 @@ public partial class MainWindow : Window
         }
         catch (ApiException ex)
         {
-            failedPolls++;
-            TimeSpan wait = ex.RetryAfter ?? TimeSpan.FromSeconds(Math.Min(900, 60 * Math.Pow(2, Math.Min(failedPolls, 4))));
-            pollTimer.Interval = wait < TimeSpan.FromSeconds(60) ? TimeSpan.FromSeconds(60) : wait;
             StatusText.Text = ex.OutcomeUnknown
                 ? "Chưa xác định kết quả thao tác. Kiểm tra trên Eldorado trước khi thực hiện lại."
                 : "Eldorado chưa xử lý được yêu cầu. " + ex.Message;
         }
         catch (HttpRequestException)
         {
-            StatusText.Text = "Không kết nối được Eldorado. App sẽ thử đồng bộ lại sau 2 phút.";
-            pollTimer.Interval = TimeSpan.FromMinutes(2);
+            StatusText.Text = "Không kết nối được Eldorado. Đồng bộ tự động vẫn tiếp tục kiểm tra riêng từng mục.";
         }
         catch (TaskCanceledException)
         {
@@ -137,31 +186,82 @@ public partial class MainWindow : Window
             StatusText.Text = "Chưa kết nối shop. Vào Kết nối shop để nhập credentials.";
             return;
         }
-        StatusText.Text = "Đang đồng bộ đơn hàng, yêu cầu cày thuê và offer…";
+        await PollStreamsAsync(force: true);
+        if (OffersPage.Visibility == Visibility.Visible) await LoadOffersAsync();
+    }
+
+    private async Task PollStreamsAsync(bool force = false)
+    {
+        ShopPoller? current = poller;
+        if (current is null || quitting) return;
         var newEvents = new List<(string Stream, string Id)>();
         try
         {
-            // Keep partial successful reads visible if a later endpoint fails.
-            orders = await api.GetOrdersAsync();
-            ApplyOrderFilter();
-            ObserveNew("orders", orders.Select(x => x.Id), newEvents);
-            requests = await api.GetRequestsAsync();
-            string? selectedRequestId = (RequestsGrid.SelectedItem as BoostRequest)?.Id;
-            RequestsGrid.ItemsSource = requests;
-            RequestsGrid.SelectedItem = requests.FirstOrDefault(x => x.Id == selectedRequestId);
-            ObserveNew("requests", requests.Select(x => x.Id), newEvents);
-            offers = await api.GetOffersAsync();
-            ApplyOfferFilter();
-            failedPolls = 0;
-            pollTimer.Interval = TimeSpan.FromSeconds(60);
-            StatusText.Text = $"Đồng bộ lúc {DateTime.Now:HH:mm:ss} · {orders.Count} đơn · {requests.Count} yêu cầu · {offers.Count} offer · tự làm mới sau 60 giây";
-            if (api.OfferWarnings.Count > 0)
-                StatusText.Text += "\nMột số offer chưa tải được. " + string.Join(" ", api.OfferWarnings);
+            // Each callback updates immediately. A slow or failed order read cannot hold up requests.
+            await Task.WhenAll(PollOrdersAsync(current, force, newEvents), PollRequestsAsync(current, force, newEvents));
+            if (ReferenceEquals(current, poller)) ShowNewNotification(newEvents);
         }
-        finally
+        catch (Exception)
         {
-            ShowNewNotification(newEvents);
+            StatusText.Text = "Không lưu được mốc đồng bộ. Kiểm tra dung lượng lưu trữ trên máy.";
         }
+    }
+
+    private async Task PollOrdersAsync(ShopPoller current, bool force, List<(string Stream, string Id)> events)
+    {
+        StreamSnapshot<Order> snapshot = await current.PollOrdersAsync(force);
+        if (!ReferenceEquals(current, poller) || quitting) return;
+        if (snapshot.IsFresh)
+        {
+            orders = snapshot.Items.ToList();
+            ApplyOrderFilter();
+            OrdersCountText.Text = orders.Count(x => x.State == "Paid").ToString();
+            ObserveNew("orders", orders.Select(x => x.Id), events);
+        }
+        if (snapshot.Error is not null)
+            StatusText.Text = $"Đơn hàng chưa cập nhật · lần thành công {FormatSync(snapshot.LastSuccess)} · thử lại lúc {snapshot.NextAttempt.ToLocalTime():HH:mm:ss}. {snapshot.Error}";
+    }
+
+    private async Task PollRequestsAsync(ShopPoller current, bool force, List<(string Stream, string Id)> events)
+    {
+        StreamSnapshot<BoostRequest> snapshot = await current.PollRequestsAsync(force);
+        if (!ReferenceEquals(current, poller) || quitting) return;
+        if (snapshot.IsFresh)
+        {
+            requests = snapshot.Items.ToList();
+            string? selectedId = quoteRequest?.Id;
+            suppressRequestSelection = true;
+            try
+            {
+                RequestsGrid.ItemsSource = requests;
+                RequestsGrid.SelectedItem = requests.FirstOrDefault(x => x.Id == selectedId);
+            }
+            finally { suppressRequestSelection = false; }
+            // Keep the in-progress quote untouched, including when its row leaves the latest page.
+            RequestsCountText.Text = requests.Count.ToString();
+            ObserveNew("requests", requests.Select(x => x.Id), events);
+            LastBoostSyncText.Text = FormatSync(snapshot.LastSuccess);
+            StatusText.Text = $"Yêu cầu cày thuê đã cập nhật lúc {FormatSync(snapshot.LastSuccess)} · tự kiểm tra mỗi 15 giây · {requests.Count} yêu cầu mới nhất";
+        }
+        if (snapshot.Error is not null)
+        {
+            LastBoostSyncText.Text = "Đang chờ thử lại";
+            StatusText.Text = $"Yêu cầu cày thuê chưa cập nhật · lần thành công {FormatSync(snapshot.LastSuccess)} · thử lại lúc {snapshot.NextAttempt.ToLocalTime():HH:mm:ss}. {snapshot.Error}";
+        }
+    }
+
+    private static string FormatSync(DateTimeOffset? time) => time?.ToLocalTime().ToString("HH:mm:ss") ?? "chưa có";
+
+    private async Task LoadOffersAsync()
+    {
+        SellerApi? current = api;
+        if (current is null) return;
+        StatusText.Text = "Đang tải offer. Yêu cầu cày thuê vẫn tự cập nhật riêng.";
+        List<Offer> result = await current.GetOffersAsync();
+        if (!ReferenceEquals(current, api)) return;
+        offers = result;
+        ApplyOfferFilter();
+        StatusText.Text = $"Đã tải {offers.Count} offer lúc {DateTime.Now:HH:mm:ss}. " + string.Join(" ", current.OfferWarnings);
     }
 
     private void ObserveNew(string stream, IEnumerable<string> ids, List<(string Stream, string Id)> newEvents)
@@ -179,7 +279,7 @@ public partial class MainWindow : Window
         int orderCount = newEvents.Count(x => x.Stream == "orders");
         int requestCount = newEvents.Count - orderCount;
         string summary = $"{orderCount} đơn hàng và {requestCount} yêu cầu cày thuê mới.";
-        tray.ShowBalloonTip(8000, "Eldorado · Có cập nhật mới", summary + " Bấm để xem mục mới nhất.", Forms.ToolTipIcon.Info);
+        tray?.ShowBalloonTip(8000, "Eldorado · Có cập nhật mới", summary + " Bấm để xem mục mới nhất.", Forms.ToolTipIcon.Info);
     }
 
     private void OpenNotification()
@@ -203,7 +303,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Navigate(object sender, RoutedEventArgs e)
+    private async void Navigate(object sender, RoutedEventArgs e)
     {
         if (!ready || sender is not RadioButton item) return;
         int page = int.Parse((string)item.Tag, CultureInfo.InvariantCulture);
@@ -219,6 +319,7 @@ public partial class MainWindow : Window
             "Chọn yêu cầu khách, đặt giá và thời gian hoàn thành.",
             "Thông tin kết nối được lưu an toàn trên máy Windows này."
         }[page];
+        if (page == 1 && !previewMode) await RunAsync(LoadOffersAsync);
     }
 
     private async void RefreshClick(object sender, RoutedEventArgs e) => await RunAsync(SyncAllAsync);
@@ -304,24 +405,60 @@ public partial class MainWindow : Window
         await RunAsync(async () => { await api.ChangeQuantityAsync(offer, quantity); await SyncAllAsync(); });
     }
 
-    private void RequestSelected(object sender, SelectionChangedEventArgs e)
+    private async void RequestSelected(object sender, SelectionChangedEventArgs e)
     {
+        if (suppressRequestSelection) return;
         var request = RequestsGrid.SelectedItem as BoostRequest;
+        quoteRequest = request;
         SaveDraftButton.IsEnabled = request is not null;
         CopyQuoteButton.IsEnabled = request is not null;
-        RequestDetails.Text = request is null ? "Chọn yêu cầu của khách." : $"{request.Category}\nGame {request.Game}\nNgười mua {request.Buyer}\n\nMã yêu cầu\n{request.Id}\n\n{request.Created.ToLocalTime():dd/MM/yyyy HH:mm}";
+        RequestDetails.Text = request is null ? "Chọn yêu cầu của khách." : $"{request.Category} · {request.Game}\nKhách {request.Buyer}\n{request.Id}";
         QuoteDraft? draft = request is null ? null : store.LoadDraft(request.Id);
         QuotePrice.Text = draft?.Price.ToString(CultureInfo.CurrentCulture) ?? "";
         QuoteCurrency.SelectedItem = draft?.Currency ?? "USD";
-        QuoteDelivery.SelectedItem = draft?.DeliveryTime ?? SellerApi.DeliveryTimes.FirstOrDefault();
+        QuoteDelivery.SelectedValue = draft?.DeliveryTime ?? SellerApi.DeliveryTimes.FirstOrDefault();
         SetQuoteState(request is null ? null : store.GetStatus(request.Id));
+        await LoadRequestDetailsAsync(request);
+    }
+
+    private async Task LoadRequestDetailsAsync(BoostRequest? request)
+    {
+        if (request is null)
+        {
+            RequestContent.Text = "Chọn một yêu cầu để đọc nội dung chi tiết.";
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(request.Description))
+        {
+            RequestContent.Text = request.Description;
+            return;
+        }
+        SellerApi? current = api;
+        if (current is null) return;
+        RequestContent.Text = "Đang tải nội dung yêu cầu…";
+        string text;
+        try
+        {
+            text = await current.GetRequestDetailsAsync(request.Id)
+                ?? "Eldorado chưa trả về nội dung chi tiết cho kết nối này. Bấm Mở yêu cầu trên Eldorado để xem đúng yêu cầu của khách.";
+        }
+        catch (ApiException error)
+        {
+            text = error.Message + "\nMở yêu cầu trên Eldorado để đọc đầy đủ nội dung trước khi báo giá.";
+        }
+        catch (Exception)
+        {
+            text = "Chưa tải được nội dung chi tiết. Bấm Mở yêu cầu trên Eldorado để đọc yêu cầu trước khi báo giá.";
+        }
+        if (ReferenceEquals(current, api) && quoteRequest?.Id == request.Id)
+            RequestContent.Text = text;
     }
 
     private void SetQuoteState(string? status)
     {
         bool locked = status is "Sending" or "Unknown" or "Sent" or "UserConfirmed";
-        SendQuoteButton.IsEnabled = RequestsGrid.SelectedItem is BoostRequest && !locked;
-        SaveDraftButton.IsEnabled = RequestsGrid.SelectedItem is BoostRequest && !locked;
+        SendQuoteButton.IsEnabled = quoteRequest is not null && !locked;
+        SaveDraftButton.IsEnabled = quoteRequest is not null && !locked;
         QuotePrice.IsEnabled = !locked;
         QuoteCurrency.IsEnabled = !locked;
         QuoteDelivery.IsEnabled = !locked;
@@ -337,8 +474,8 @@ public partial class MainWindow : Window
 
     private QuoteDraft? ReadDraft()
     {
-        if (RequestsGrid.SelectedItem is not BoostRequest request || !TryPrice(QuotePrice.Text, out decimal price)) return null;
-        if (QuoteCurrency.SelectedItem is not string currency || QuoteDelivery.SelectedItem is not string delivery)
+        if (quoteRequest is not BoostRequest request || !TryPrice(QuotePrice.Text, out decimal price)) return null;
+        if (QuoteCurrency.SelectedItem is not string currency || QuoteDelivery.SelectedValue is not string delivery)
         {
             ShowInfo("Chọn đơn vị tiền và thời gian hoàn thành.");
             return null;
@@ -358,17 +495,17 @@ public partial class MainWindow : Window
     private void CopyQuoteClick(object sender, RoutedEventArgs e)
     {
         QuoteDraft? draft = ReadDraft();
-        if (draft is null || RequestsGrid.SelectedItem is not BoostRequest request) return;
-        System.Windows.Clipboard.SetText($"Yêu cầu {draft.RequestId}\n{request.Category} · Game {request.Game}\nNgười mua {request.Buyer}\nGiá {draft.Price.ToString(CultureInfo.InvariantCulture)} {draft.Currency}\nThời gian {draft.DeliveryTime}");
+        if (draft is null || quoteRequest is not BoostRequest request) return;
+        System.Windows.Clipboard.SetText($"Yêu cầu {draft.RequestId}\n{request.Category} · Game {request.Game}\nNgười mua {request.Buyer}\nGiá {draft.Price.ToString(CultureInfo.InvariantCulture)} {draft.Currency}\nThời gian {DeliveryLabel(draft.DeliveryTime)}");
         StatusText.Text = "Đã sao chép báo giá. Chỉ gửi sau khi bạn kiểm tra đầy đủ yêu cầu.";
     }
 
     private async void SendQuoteClick(object sender, RoutedEventArgs e)
     {
         QuoteDraft? draft = ReadDraft();
-        if (draft is null || RequestsGrid.SelectedItem is not BoostRequest request || api is null) return;
+        if (draft is null || quoteRequest is not BoostRequest request || api is null) return;
         if (store.GetStatus(request.Id) is "Sending" or "Unknown" or "Sent" or "UserConfirmed") return;
-        if (!Confirm($"Gửi báo giá này cho khách?\n\n{request.Category} · Game {request.Game}\nKhách {request.Buyer}\nMã yêu cầu {request.Id}\n\nGiá {draft.Price:G29} {draft.Currency}\nThời gian {draft.DeliveryTime}\n\nHãy đối chiếu đầy đủ nội dung yêu cầu trên Eldorado trước khi gửi.", "Kiểm tra báo giá")) return;
+        if (!Confirm($"Gửi báo giá này cho khách?\n\n{request.Category} · Game {request.Game}\nKhách {request.Buyer}\nMã yêu cầu {request.Id}\n\nGiá {draft.Price:G29} {draft.Currency}\nThời gian {DeliveryLabel(draft.DeliveryTime)}\n\nHãy đối chiếu đầy đủ nội dung yêu cầu trên Eldorado trước khi gửi.", "Kiểm tra báo giá")) return;
         await RunAsync(async () =>
         {
             store.SaveDraft(draft);
@@ -398,7 +535,7 @@ public partial class MainWindow : Window
 
     private async void ResolveQuoteClick(object sender, RoutedEventArgs e)
     {
-        if (RequestsGrid.SelectedItem is not BoostRequest request) return;
+        if (quoteRequest is not BoostRequest request) return;
         var result = System.Windows.MessageBox.Show(this,
             $"Hãy mở Eldorado và đối chiếu yêu cầu {request.Id}.\n\nChọn Có nếu báo giá đã xuất hiện.\nChọn Không nếu bạn đã xác nhận chưa có báo giá và muốn mở lại nút gửi.\nChọn Hủy để tiếp tục giữ trạng thái hiện tại.",
             "Đối chiếu kết quả", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
@@ -450,6 +587,8 @@ public partial class MainWindow : Window
         CredentialStore.Delete();
         credentials = null;
         api = null;
+        poller = null;
+        quoteRequest = null;
         ClientIdInput.Clear();
         ClientSecretInput.Clear();
         CredentialHint.Text = "Đã xóa thông tin đăng nhập.";
@@ -475,6 +614,11 @@ public partial class MainWindow : Window
     private void ShowInfo(string text) => System.Windows.MessageBox.Show(this, text, "Eldorado", MessageBoxButton.OK, MessageBoxImage.Information);
     private static void OpenWebsite(string path) => Process.Start(new ProcessStartInfo("https://www.eldorado.gg" + path) { UseShellExecute = true });
     private void OpenChatClick(object sender, RoutedEventArgs e) => OpenWebsite("/dashboard/messages");
+    private void OpenRequestClick(object sender, RoutedEventArgs e)
+    {
+        if (quoteRequest is not null) OpenWebsite("/boosting-request/" + Uri.EscapeDataString(quoteRequest.Id));
+        else OpenWebsite("/dashboard");
+    }
     private void OpenDashboardClick(object sender, RoutedEventArgs e) => OpenWebsite("/dashboard");
     private void OpenSellerApiClick(object sender, RoutedEventArgs e) => OpenWebsite("/dashboard/seller-api");
 
@@ -495,15 +639,21 @@ public partial class MainWindow : Window
 
     private void WindowStateChanged(object? sender, EventArgs e)
     {
-        if (WindowState == WindowState.Minimized) Hide();
+        // Keep the taskbar button when minimized so the app remains easy to find.
     }
 
     private void WindowClosing(object? sender, CancelEventArgs e)
     {
-        if (!quitting)
+        if (!quitting && CloseToTray.IsChecked == true)
         {
             e.Cancel = true;
             Hide();
+            tray?.ShowBalloonTip(6000, "Eldorado vẫn đang chạy", "Mở lại bằng biểu tượng Eldorado ở khay hệ thống. Bấm mũi tên cạnh đồng hồ nếu biểu tượng đang ẩn.", Forms.ToolTipIcon.Info);
+        }
+        else if (!quitting)
+        {
+            e.Cancel = true;
+            WindowState = WindowState.Minimized;
         }
     }
 
@@ -519,8 +669,11 @@ public partial class MainWindow : Window
         }
         quitting = true;
         pollTimer.Stop();
-        tray.Visible = false;
-        tray.Dispose();
+        if (tray is not null)
+        {
+            tray.Visible = false;
+            tray.Dispose();
+        }
         http.Dispose();
         store.Dispose();
         Close();

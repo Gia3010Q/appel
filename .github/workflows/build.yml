@@ -37,6 +37,18 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
           }
           if (-not (Test-Path -LiteralPath $compiler)) { throw 'ISCC.exe was not found.' }
+      - name: Render interface preview
+        shell: pwsh
+        run: |
+          $previewPath = Join-Path (Get-Location) 'artifacts/preview.png'
+          $appProcess = Start-Process -FilePath 'artifacts/app/Eldorado.Desktop.exe' -ArgumentList @('--preview', $previewPath) -WindowStyle Hidden -PassThru
+          if (-not $appProcess.WaitForExit(60000)) { $appProcess.Kill(); throw 'Preview rendering timed out.' }
+          if ($appProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $previewPath)) { throw 'Preview rendering failed.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Interface-preview
+          path: artifacts/preview.png
+          if-no-files-found: error
       - name: Build installer
         shell: pwsh
         run: |
@@ -51,4 +63,3 @@ jobs:
             artifacts/EldoradoDesk-portable-win-x64.zip
           if-no-files-found: error
           retention-days: 14
-

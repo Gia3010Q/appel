@@ -8,8 +8,11 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets/app.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
+    <Content Include="Assets/app.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Resource Include="Assets/app.png" />
     <ProjectReference Include="../Eldorado.Core/Eldorado.Core.csproj" />
   </ItemGroup>
 </Project>

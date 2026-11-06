@@ -55,6 +55,30 @@ public sealed class SellerApi
             Date(x, "createdDate") ?? DateTimeOffset.MinValue)).ToList();
     }
 
+    /// <summary>
+    /// Read-only request detail route used by Eldorado's official web frontend.
+    /// This route is outside Seller OpenAPI; a seller token may lack permission.
+    /// Call for the selected request only and show an explicit website fallback on failure.
+    /// </summary>
+    public async Task<string?> GetRequestDetailsAsync(string requestId)
+    {
+        ValidateId(requestId);
+        var root = await SendAsync(HttpMethod.Get, $"api/boostingOffers/boostingRequests/{requestId}");
+        if (!Guid.TryParse(Text(root, "id"), out var actualId) || actualId != Guid.Parse(requestId))
+            throw new ApiException("Chưa xác minh được nội dung thuộc yêu cầu đã chọn. Hãy mở yêu cầu trên Eldorado.");
+        var values = Field(Field(root, "boostingRequestDetails"), "descriptionValues");
+        if (values.ValueKind != JsonValueKind.Array) return null;
+        var lines = new List<string>();
+        foreach (var field in values.EnumerateArray())
+        {
+            var label = Text(field, "label").Trim();
+            var value = Text(field, "value").Trim();
+            if (value.Length == 0) continue;
+            lines.Add(label.Length == 0 ? value : $"{label}\n{value}");
+        }
+        return lines.Count == 0 ? null : string.Join("\n\n", lines);
+    }
+
     public async Task<List<Offer>> GetOffersAsync()
     {
         List<Offer> offers = [];
@@ -238,6 +262,8 @@ public sealed class SellerApi
                 using var request = new HttpRequestMessage(method, path);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 request.Headers.Add("swagger", "Swager request");
+                if (method == HttpMethod.Get)
+                    request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true };
                 if (body != null) request.Content = JsonContent.Create(body);
                 using var response = await http.SendAsync(request);
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
@@ -320,7 +346,7 @@ public sealed class SellerApi
         return new Order(Required(root, "id"), Text(offer, "offerTitle"), Text(offer, "gameId"),
             Required(Field(root, "state"), "state"), Text(offer, "category"), Text(root, "buyerUsername"),
             Number(money, "amount") ?? throw new ApiException("Phản hồi đơn hàng thiếu giá trị thanh toán."),
-            Required(money, "currency"), deadline);
+            Required(money, "currency"), deadline, Text(offer, "description"));
     }
 
     private static Offer ReadOffer(JsonElement root, string kind)

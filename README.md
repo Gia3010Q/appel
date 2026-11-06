@@ -7,7 +7,7 @@
 - Đọc 50 đơn mới nhất, lọc đơn chờ giao, xem hạn giao khi API có dữ liệu và xác nhận giao sau bước kiểm tra mã đơn.
 - Đọc yêu cầu cày thuê đang hoạt động, nhập giá, tiền tệ và thời gian hoàn thành rồi gửi báo giá cho đúng mã yêu cầu. Lưu bản nháp bằng SQLite.
 - Đọc các nhóm offer tài khoản, predefined, item và currency. Sửa giá hoặc số lượng theo khả năng của từng nhóm.
-- Chạy ở khay hệ thống, đồng bộ mỗi 60 giây, giãn khoảng gọi khi gặp giới hạn API. Lưu mốc đã xem để tránh báo lại dữ liệu cũ sau khi mở app.
+- Chạy ở khay hệ thống, đồng bộ đơn và yêu cầu cày thuê độc lập mỗi 15 giây, giãn khoảng gọi riêng từng luồng khi gặp giới hạn API. Offer tải khi mở mục Offer hoặc làm mới thủ công. Lưu mốc đã xem để tránh báo lại dữ liệu cũ sau khi mở app.
 - Lưu credentials trong Windows Credential Manager. Access token chỉ giữ trong bộ nhớ.
 
 ## Build trên cloud
