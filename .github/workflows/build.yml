@@ -1,0 +1,51 @@
+name: Build Windows app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Run regression checks
+        run: dotnet run --project tests/Eldorado.Tests/Eldorado.Tests.csproj --configuration Release
+      - name: Publish Windows x64
+        run: >-
+          dotnet publish src/Eldorado.Desktop/Eldorado.Desktop.csproj
+          --configuration Release --runtime win-x64 --self-contained true
+          -p:PublishSingleFile=false --output artifacts/app
+      - name: Prepare Inno Setup
+        shell: pwsh
+        run: |
+          $compiler = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $compiler)) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup installation failed.' }
+          }
+          if (-not (Test-Path -LiteralPath $compiler)) { throw 'ISCC.exe was not found.' }
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' installer/setup.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
+          Compress-Archive -Path artifacts/app/* -DestinationPath artifacts/EldoradoDesk-portable-win-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EldoradoDesk-Windows-x64
+          path: |
+            artifacts/EldoradoDesk-Setup.exe
+            artifacts/EldoradoDesk-portable-win-x64.zip
+          if-no-files-found: error
+          retention-days: 14
