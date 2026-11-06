@@ -153,7 +153,7 @@
         <!-- ============ ComboBox ============ -->
         <Style x:Key="FieldCombo" TargetType="ComboBox">
             <Setter Property="Background" Value="{StaticResource InputBg}"/>
-            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+            <Setter Property="Foreground" Value="#111827"/>
             <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="10,8"/>

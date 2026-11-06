@@ -35,14 +35,22 @@ internal static class PreviewRenderer
         var content = window.Content as FrameworkElement
             ?? throw new InvalidOperationException("Preview requires a WPF content element.");
         window.Content = null;
+        content.Resources.MergedDictionaries.Add(window.Resources);
+        System.Windows.Documents.TextElement.SetForeground(content, window.Foreground);
         content.Width = 1440;
         content.Height = 900;
-        if (content is System.Windows.Controls.Panel panel) panel.Background = window.Background;
-        content.Measure(new Size(1440, 900));
-        content.Arrange(new Rect(0, 0, 1440, 900));
-        content.UpdateLayout();
+        var surface = new System.Windows.Controls.Border
+        {
+            Width = 1440, Height = 900,
+            Background = new SolidColorBrush(Color.FromRgb(11, 17, 28)),
+            Child = content
+        };
+        surface.Measure(new Size(1440, 900));
+        surface.Arrange(new Rect(0, 0, 1440, 900));
+        surface.UpdateLayout();
+        await window.Dispatcher.InvokeAsync(surface.UpdateLayout, DispatcherPriority.ApplicationIdle);
         var bitmap = new RenderTargetBitmap(1440, 900, 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(content);
+        bitmap.Render(surface);
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
         string destination = Path.GetFullPath(outputPath);
