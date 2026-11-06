@@ -87,6 +87,7 @@ public partial class MainWindow : Window
             new("a340c101-4931-41bf-9f02-000000000005", "Roblox", "Luyện cấp", "BearCloud", now.AddMinutes(-12)),
             new("a340c101-4931-41bf-9f02-000000000006", "Valorant", "Net Wins", "KayTran", now.AddMinutes(-18))
         };
+        requests[0] = requests[0] with { Description = "Dữ liệu minh họa: Gold 2 → Platinum 1, máy chủ Asia, hoàn thành trong 2 ngày." };
         RequestsGrid.ItemsSource = requests;
         RequestsGrid.SelectedIndex = 0;
         QuotePrice.Text = "18.50";
@@ -228,7 +229,10 @@ public partial class MainWindow : Window
         if (!ReferenceEquals(current, poller) || quitting) return;
         if (snapshot.IsFresh)
         {
-            requests = snapshot.Items.ToList();
+            requests = snapshot.Items.Select(item => item with
+            {
+                Description = requests.FirstOrDefault(previous => previous.Id == item.Id)?.Description ?? item.Description
+            }).ToList();
             string? selectedId = quoteRequest?.Id;
             suppressRequestSelection = true;
             try
@@ -437,10 +441,11 @@ public partial class MainWindow : Window
         if (current is null) return;
         RequestContent.Text = "Đang tải nội dung yêu cầu…";
         string text;
+        string? description = null;
         try
         {
-            text = await current.GetRequestDetailsAsync(request.Id)
-                ?? "Eldorado chưa trả về nội dung chi tiết cho kết nối này. Bấm Mở yêu cầu trên Eldorado để xem đúng yêu cầu của khách.";
+            description = await current.GetRequestDetailsAsync(request.Id);
+            text = description ?? "Eldorado chưa trả về nội dung chi tiết cho kết nối này. Bấm Mở yêu cầu trên Eldorado để xem đúng yêu cầu của khách.";
         }
         catch (ApiException error)
         {
@@ -451,7 +456,21 @@ public partial class MainWindow : Window
             text = "Chưa tải được nội dung chi tiết. Bấm Mở yêu cầu trên Eldorado để đọc yêu cầu trước khi báo giá.";
         }
         if (ReferenceEquals(current, api) && quoteRequest?.Id == request.Id)
+        {
             RequestContent.Text = text;
+            if (!string.IsNullOrWhiteSpace(description))
+            {
+                quoteRequest = request with { Description = description };
+                requests = requests.Select(item => item.Id == request.Id ? quoteRequest : item).ToList();
+                suppressRequestSelection = true;
+                try
+                {
+                    RequestsGrid.ItemsSource = requests;
+                    RequestsGrid.SelectedItem = requests.FirstOrDefault(item => item.Id == request.Id);
+                }
+                finally { suppressRequestSelection = false; }
+            }
+        }
     }
 
     private void SetQuoteState(string? status)
