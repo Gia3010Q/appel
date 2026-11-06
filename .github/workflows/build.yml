@@ -19,6 +19,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - name: Compile Windows desktop
+        run: dotnet build src/Eldorado.Desktop/Eldorado.Desktop.csproj --configuration Release
       - name: Run regression checks
         run: dotnet run --project tests/Eldorado.Tests/Eldorado.Tests.csproj --configuration Release
       - name: Publish Windows x64
@@ -49,3 +51,4 @@ jobs:
             artifacts/EldoradoDesk-portable-win-x64.zip
           if-no-files-found: error
           retention-days: 14
+
