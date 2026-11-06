@@ -458,7 +458,8 @@ await Check("Request details permission error is surfaced without cookie fallbac
     Require(reads == 1, "Permission failure retried or used a fallback route");
 });
 
-Console.WriteLine($"PASS: {passed} regression scenarios");
+await CatalogChecks.RunAsync();
+Console.WriteLine($"PASS: {passed} regression scenarios + 7 catalog scenarios");
 return;
 
 async Task Check(string name, Func<Task> test)

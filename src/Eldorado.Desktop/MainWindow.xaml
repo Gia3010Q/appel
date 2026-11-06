@@ -499,6 +499,7 @@
                                 </StackPanel>
                             </ScrollViewer>
                             <StackPanel Grid.Row="2" Margin="0,16,0,0">
+<TextBlock Text="BẢNG GIÁ SHOP" Style="{StaticResource FieldLabel}"/><ComboBox x:Name="CatalogItems" DisplayMemberPath="Name" Style="{StaticResource FieldCombo}" IsTextSearchEnabled="True"/><Button x:Name="ApplyCatalogPriceButton" Content="Lấy giá và thời gian dịch vụ" Style="{StaticResource GhostButton}" Click="ApplyCatalogPriceClick" Margin="0,8,0,12" IsEnabled="False"/>
                                 <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*"/>
@@ -552,7 +553,7 @@
                         </Border>
                         <Border Style="{StaticResource Card}" Margin="0,16,0,0">
                             <StackPanel>
-                                <TextBlock Text="ĐỒNG BỘ TỰ ĐỘNG" Style="{StaticResource CardTitle}"/><CheckBox x:Name="CloseToTray" Content="Đóng xuống khay hệ thống thay vì taskbar" IsChecked="False" Foreground="{StaticResource Text}" Margin="0,12,0,0"/>
+                                <TextBlock Text="ĐỒNG BỘ TỰ ĐỘNG" Style="{StaticResource CardTitle}"/><TextBlock Text="BẢNG GIÁ TỪ GITHUB" Style="{StaticResource FieldLabel}" Margin="0,16,0,8"/><TextBlock x:Name="CatalogStatus" Text="Đang kiểm tra bảng giá…" TextWrapping="Wrap" Foreground="{StaticResource Muted}"/><TextBlock Text="Gia3010Q/rem-el · ui-fix/prices.json" Foreground="{StaticResource Muted}" Margin="0,8,0,8"/><Button x:Name="RefreshPricesButton" Content="Cập nhật giá ngay" Style="{StaticResource GhostButton}" Click="RefreshPricesClick" HorizontalAlignment="Left"/><CheckBox x:Name="CloseToTray" Content="Đóng xuống khay hệ thống thay vì taskbar" IsChecked="False" Foreground="{StaticResource Text}" Margin="0,12,0,0"/>
                                 <TextBlock Text="App kiểm tra đơn hàng và yêu cầu mới độc lập mỗi 15 giây. Offer tải khi bạn mở mục Offer hoặc làm mới. Khi Eldorado giới hạn lượt gọi, app sẽ chờ lâu hơn. Mỗi lần chỉ tải 50 bản ghi mới nhất. Lượng tin nhắn mới không thông báo ở đây — mở Dashboard để xem." Foreground="{StaticResource Muted}" TextWrapping="Wrap" LineHeight="20" Margin="0,8,0,0"/>
                                 <TextBlock Text="Mở app hoặc thu nhỏ vẫn có biểu tượng trên taskbar. Bấm X mặc định thu nhỏ; chọn Thoát để đóng hẳn." Foreground="{StaticResource Muted}" TextWrapping="Wrap" LineHeight="20" Margin="0,8,0,0"/>
                             </StackPanel>

@@ -24,6 +24,9 @@ public partial class MainWindow : Window
     private readonly SemaphoreSlim operation = new(1, 1);
     private readonly DispatcherTimer pollTimer = new() { Interval = TimeSpan.FromSeconds(15) };
     private readonly LocalStore store;
+    private readonly PriceCatalogService priceCatalog;
+    private readonly DispatcherTimer priceTimer = new() { Interval = TimeSpan.FromMinutes(5) };
+    private bool refreshingPrices;
     private readonly Forms.NotifyIcon? tray;
     private SellerApi? api;
     private ShopPoller? poller;
@@ -47,6 +50,8 @@ public partial class MainWindow : Window
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EldoradoShop");
         Directory.CreateDirectory(dataFolder);
         store = new LocalStore(Path.Combine(dataFolder, "shop.db"));
+        priceCatalog = new PriceCatalogService(http, Path.Combine(dataFolder, "prices-cache.json"));
+        priceTimer.Tick += async (_, _) => await RefreshPriceCatalogAsync();
         if (!previewMode)
         {
         tray = new Forms.NotifyIcon
@@ -116,6 +121,9 @@ public partial class MainWindow : Window
         {
             return;
         }
+        UpdatePriceCatalogView();
+        priceTimer.Start();
+        _ = RefreshPriceCatalogAsync();
         await RunAsync(async () =>
         {
             credentials = CredentialStore.Load();
@@ -476,6 +484,7 @@ public partial class MainWindow : Window
     private void SetQuoteState(string? status)
     {
         bool locked = status is "Sending" or "Unknown" or "Sent" or "UserConfirmed";
+        ApplyCatalogPriceButton.IsEnabled = quoteRequest is not null && !locked && priceCatalog.Current is not null;
         SendQuoteButton.IsEnabled = quoteRequest is not null && !locked;
         SaveDraftButton.IsEnabled = quoteRequest is not null && !locked;
         QuotePrice.IsEnabled = !locked;
@@ -678,6 +687,52 @@ public partial class MainWindow : Window
 
     private void QuitClick(object sender, RoutedEventArgs e) => RequestQuit();
 
+    private async void RefreshPricesClick(object sender, RoutedEventArgs e) => await RefreshPriceCatalogAsync();
+
+    private async Task RefreshPriceCatalogAsync()
+    {
+        if (previewMode || quitting || refreshingPrices) return;
+        refreshingPrices = true;
+        RefreshPricesButton.IsEnabled = false;
+        try
+        {
+            await priceCatalog.RefreshAsync();
+            if (quitting) return;
+            UpdatePriceCatalogView();
+            CatalogStatus.Text = $"{priceCatalog.Current!.Items.Count} dịch vụ · kiểm tra lúc {priceCatalog.LastChecked:HH:mm:ss} · tự cập nhật mỗi 5 phút";
+        }
+        catch (Exception)
+        {
+            if (quitting) return;
+            CatalogStatus.Text = priceCatalog.Current is null
+                ? "Chưa tải được bảng giá. Kiểm tra mạng hoặc file prices.json rồi cập nhật lại."
+                : "Chưa tải được bản mới. Đang dùng bảng giá hợp lệ đã lưu trên máy.";
+        }
+        finally
+        {
+            refreshingPrices = false;
+            if (!quitting) RefreshPricesButton.IsEnabled = true;
+        }
+    }
+
+    private void UpdatePriceCatalogView()
+    {
+        string? selected = (CatalogItems.SelectedItem as CatalogItem)?.Name;
+        CatalogItems.ItemsSource = priceCatalog.Current?.Items;
+        CatalogItems.SelectedItem = priceCatalog.Current?.Items.FirstOrDefault(item => item.Name == selected);
+        SetQuoteState(quoteRequest is null ? null : store.GetStatus(quoteRequest.Id));
+    }
+
+    private void ApplyCatalogPriceClick(object sender, RoutedEventArgs e)
+    {
+        if (quoteRequest is null || CatalogItems.SelectedItem is not CatalogItem item || priceCatalog.Current is null) return;
+        if (store.GetStatus(quoteRequest.Id) is "Sending" or "Unknown" or "Sent" or "UserConfirmed") return;
+        QuotePrice.Text = item.Price.ToString(CultureInfo.CurrentCulture);
+        QuoteCurrency.SelectedItem = priceCatalog.Current.Currency;
+        QuoteDelivery.SelectedValue = item.Delivery;
+        StatusText.Text = $"Đã lấy giá {item.Name}: {item.Price:G29} {priceCatalog.Current.Currency}. Kiểm tra yêu cầu của khách trước khi gửi.";
+    }
+
     private void RequestQuit()
     {
         if (working)
@@ -688,6 +743,7 @@ public partial class MainWindow : Window
         }
         quitting = true;
         pollTimer.Stop();
+        priceTimer.Stop();
         if (tray is not null)
         {
             tray.Visible = false;
