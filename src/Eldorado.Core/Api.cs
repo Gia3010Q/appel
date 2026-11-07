@@ -10,6 +10,7 @@ namespace Eldorado.Core;
 public sealed class SellerApi
 {
     private readonly HttpClient http;
+    private readonly Uri server;
     private readonly Func<Task<Credentials>> credentials;
     private readonly SemaphoreSlim tokenGate = new(1, 1);
     private readonly SemaphoreSlim mutationGate = new(1, 1);
@@ -36,7 +37,7 @@ public sealed class SellerApi
     {
         this.http = http;
         this.credentials = credentials;
-        http.BaseAddress ??= new Uri("https://www.eldorado.gg/");
+        server = http.BaseAddress ?? new Uri("https://www.eldorado.gg/");
     }
 
     public async Task<List<Order>> GetOrdersAsync()
@@ -235,7 +236,7 @@ public sealed class SellerApi
             var login = await credentials();
             if (string.IsNullOrWhiteSpace(login.ClientId) || string.IsNullOrWhiteSpace(login.ClientSecret))
                 throw new ApiException("Nhập Client ID và Client Secret để kết nối shop.");
-            using var request = new HttpRequestMessage(HttpMethod.Post, "api/authentication/seller/token")
+            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(server, "api/authentication/seller/token"))
             {
                 Content = JsonContent.Create(new { clientId = login.ClientId, clientSecret = login.ClientSecret })
             };
@@ -259,7 +260,7 @@ public sealed class SellerApi
         {
             for (int attempt = 0; ; attempt++)
             {
-                using var request = new HttpRequestMessage(method, path);
+                using var request = new HttpRequestMessage(method, new Uri(server, path));
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 request.Headers.Add("swagger", "Swager request");
                 if (method == HttpMethod.Get)

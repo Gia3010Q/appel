@@ -458,6 +458,49 @@ await Check("Request details permission error is surfaced without cookie fallbac
     Require(reads == 1, "Permission failure retried or used a fallback route");
 });
 
+await Check("Shop connects and reconnects after catalog used a client with no BaseAddress", async () =>
+{
+    int tokenCalls = 0;
+    string cacheFolder = Path.Combine(Path.GetTempPath(), "startup-regression", Guid.NewGuid().ToString("N"));
+    try
+    {
+        using var handler = new FakeHandler(message =>
+        {
+            if (message.RequestUri!.Host == "raw.githubusercontent.com")
+            {
+                Require(message.Headers.Authorization is null, "Public catalog leaked shop authorization");
+                return Json("{\"version\":1,\"currency\":\"USD\",\"items\":[{\"name\":\"Portal\",\"price\":1.25,\"delivery\":\"Hour1\"}]}");
+            }
+            Require(message.RequestUri.Host == "www.eldorado.gg", "Wrong API server");
+            if (IsToken(message)) { tokenCalls++; return Json(Token("token")); }
+            return Json(activePage);
+        });
+        using var sharedHttp = new HttpClient(handler);
+        var prices = new PriceCatalogService(sharedHttp, Path.Combine(cacheFolder, "prices.json"));
+        await prices.RefreshAsync();
+        for (int connection = 0; connection < 2; connection++)
+        {
+            var api = new SellerApi(sharedHttp, () => Task.FromResult(new Credentials("id", "secret")));
+            var rows = await api.GetRequestsAsync();
+            Require(rows.Single().Id == RequestId, "Requests unavailable after reconnect");
+            Require(sharedHttp.BaseAddress is null, "API changed caller HttpClient settings");
+        }
+        await prices.RefreshAsync();
+        Require(tokenCalls == 2 && prices.Current!.Items.Single().Price == 1.25m, "Reconnection or price refresh failed");
+    }
+    finally { if (Directory.Exists(cacheFolder)) Directory.Delete(cacheFolder, true); }
+});
+
+await Check("API can attach to an already started client with an existing base address", async () =>
+{
+    using var handler = new FakeHandler(message => IsToken(message) ? Json(Token("token")) : Json(activePage));
+    using var startedHttp = new HttpClient(handler) { BaseAddress = new Uri("https://example.invalid/") };
+    using var firstResponse = await startedHttp.GetAsync("warmup");
+    var api = new SellerApi(startedHttp, () => Task.FromResult(new Credentials("id", "secret")));
+    Require((await api.GetRequestsAsync()).Count == 1, "Started configured client failed");
+    Require(startedHttp.BaseAddress!.Host == "example.invalid", "Custom API base was modified");
+});
+
 await CatalogChecks.RunAsync();
 Console.WriteLine($"PASS: {passed} regression scenarios + 7 catalog scenarios");
 return;

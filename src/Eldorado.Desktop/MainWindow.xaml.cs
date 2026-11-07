@@ -21,6 +21,7 @@ public partial class MainWindow : Window
     private readonly bool previewMode;
     private sealed record DeliveryChoice(string Value, string Label);
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(30) };
+    private readonly HttpClient catalogHttp = new() { Timeout = TimeSpan.FromSeconds(15) };
     private readonly SemaphoreSlim operation = new(1, 1);
     private readonly DispatcherTimer pollTimer = new() { Interval = TimeSpan.FromSeconds(15) };
     private readonly LocalStore store;
@@ -50,7 +51,7 @@ public partial class MainWindow : Window
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "EldoradoShop");
         Directory.CreateDirectory(dataFolder);
         store = new LocalStore(Path.Combine(dataFolder, "shop.db"));
-        priceCatalog = new PriceCatalogService(http, Path.Combine(dataFolder, "prices-cache.json"));
+        priceCatalog = new PriceCatalogService(catalogHttp, Path.Combine(dataFolder, "prices-cache.json"));
         priceTimer.Tick += async (_, _) => await RefreshPriceCatalogAsync();
         if (!previewMode)
         {
@@ -750,6 +751,7 @@ public partial class MainWindow : Window
             tray.Dispose();
         }
         http.Dispose();
+        catalogHttp.Dispose();
         store.Dispose();
         Close();
     }
