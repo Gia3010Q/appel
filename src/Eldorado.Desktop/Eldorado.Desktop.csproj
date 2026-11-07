@@ -7,9 +7,13 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Version>0.3.1</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets/app.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
+    <Content Include="Assets/app.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Resource Include="Assets/app.png" />
     <ProjectReference Include="../Eldorado.Core/Eldorado.Core.csproj" />
   </ItemGroup>
 </Project>

@@ -17,6 +17,7 @@ await Check("Token reused and Bearer authorization attached", async () =>
     {
         if (IsToken(message)) { tokenCalls++; return Json(Token("token-1")); }
         Require(message.Headers.Authorization?.ToString() == "Bearer token-1", "Bearer token missing");
+        Require(message.Headers.CacheControl?.NoCache == true, "Polling GET may reuse an intermediary cache");
         return Json(activePage);
     });
     var api = Client(server);
@@ -197,7 +198,7 @@ await Check("Order schema retains state, money, category and deadline", async ()
                     buyerUsername = "boost-buyer",
                     state = new { state = "Paid", createdDate = "2026-11-06T00:00:00Z" },
                     totalPrice = new { amount = 19.25m, currency = "EUR" },
-                    orderOfferDetails = new { offerTitle = "Complete quest", gameId = "Roblox", category = "RequestedBoosting" },
+                    orderOfferDetails = new { offerTitle = "Complete quest", gameId = "Roblox", category = "RequestedBoosting", description = "Complete all requested quests" },
                     deliveryStartedDate = "2026-11-06T00:00:00Z",
                     deliveryTime = "1.02:00:00"
                 }
@@ -208,6 +209,7 @@ await Check("Order schema retains state, money, category and deadline", async ()
     Require(order.Id == RequestId && order.Title == "Complete quest" && order.Game == "Roblox", "Order identity lost");
     Require(order.State == "Paid" && order.Category == "RequestedBoosting" && order.Buyer == "boost-buyer", "Order classification lost");
     Require(order.Price == 19.25m && order.Currency == "EUR", "Order money lost");
+    Require(order.Description == "Complete all requested quests", "Order description lost");
     Require(order.Deadline == DateTimeOffset.Parse("2026-11-07T02:00:00Z", CultureInfo.InvariantCulture), "Delivery deadline incorrect");
 });
 
@@ -313,7 +315,194 @@ await Check("Malformed currency offers preserve healthy families and report warn
     Require(api.OfferWarnings.Count > 0, "Malformed family was silently skipped");
 });
 
-Console.WriteLine($"PASS: {passed} regression scenarios");
+await Check("Order endpoint failure does not block boosting request polling", async () =>
+{
+    var clock = new ManualClock();
+    int orderCalls = 0, requestCalls = 0;
+    var poller = new ShopPoller(
+        () => { orderCalls++; return Task.FromException<List<Order>>(new ApiException("Orders failed")); },
+        () => { requestCalls++; return Task.FromResult(new List<BoostRequest> { request }); }, clock);
+    var orderSnapshot = await poller.PollOrdersAsync();
+    var requestSnapshot = await poller.PollRequestsAsync();
+    Require(orderCalls == 1 && !orderSnapshot.IsFresh && orderSnapshot.Error is not null, "Order failure not recorded");
+    Require(requestCalls == 1 && requestSnapshot.IsFresh && requestSnapshot.Items.Single().Id == RequestId, "Order failure blocked boosting");
+    Require(requestSnapshot.LastSuccess == clock.GetUtcNow(), "Boosting success timestamp missing");
+});
+
+await Check("Boosting rate limit respects Retry-After even for manual refresh", async () =>
+{
+    var clock = new ManualClock();
+    int requestCalls = 0, orderCalls = 0;
+    var poller = new ShopPoller(
+        () => { orderCalls++; return Task.FromResult(new List<Order>()); },
+        () => { requestCalls++; return Task.FromException<List<BoostRequest>>(new ApiException("Rate limit", retryAfter: TimeSpan.FromSeconds(180), statusCode: 429)); }, clock);
+    var limited = await poller.PollRequestsAsync();
+    Require(limited.NextAttempt >= clock.GetUtcNow().AddSeconds(180), "Server retry deadline shortened");
+    clock.Advance(TimeSpan.FromSeconds(30));
+    await poller.PollRequestsAsync(force: true);
+    Require(requestCalls == 1, "Manual refresh bypassed server rate limit");
+    Require((await poller.PollOrdersAsync()).IsFresh && orderCalls == 1, "Boosting cooldown leaked into orders");
+    clock.Advance(TimeSpan.FromSeconds(150));
+    await poller.PollRequestsAsync();
+    Require(requestCalls == 2, "Boosting did not retry after server cooldown");
+});
+
+await Check("Polling failure retains cached data and last success time", async () =>
+{
+    var clock = new ManualClock();
+    int calls = 0;
+    var poller = new ShopPoller(() => Task.FromResult(new List<Order>()),
+        () => ++calls == 1 ? Task.FromResult(new List<BoostRequest> { request })
+            : Task.FromException<List<BoostRequest>>(new ApiException("Network failure")), clock);
+    var fresh = await poller.PollRequestsAsync();
+    clock.Advance(TimeSpan.FromSeconds(15));
+    var stale = await poller.PollRequestsAsync();
+    Require(!stale.IsFresh && stale.Error is not null, "Failure appeared fresh");
+    Require(stale.Items.Single().Id == RequestId, "Failure cleared existing boosting requests");
+    Require(stale.LastSuccess == fresh.LastSuccess, "Failure changed last successful sync timestamp");
+});
+
+await Check("Boosting poll recovers automatically after transient failure", async () =>
+{
+    var clock = new ManualClock();
+    int calls = 0;
+    var poller = new ShopPoller(() => Task.FromResult(new List<Order>()),
+        () => ++calls == 1 ? Task.FromException<List<BoostRequest>>(new ApiException("Temporary failure"))
+            : Task.FromResult(new List<BoostRequest> { request }), clock);
+    var failure = await poller.PollRequestsAsync();
+    clock.Advance(TimeSpan.FromSeconds(14));
+    await poller.PollRequestsAsync();
+    Require(calls == 1, "Poll retried before backoff elapsed");
+    clock.Advance(TimeSpan.FromSeconds(1));
+    var recovered = await poller.PollRequestsAsync();
+    Require(calls == 2 && recovered.IsFresh && recovered.Error is null, "Poll did not recover without user intervention");
+    Require(recovered.LastSuccess == clock.GetUtcNow(), "Recovery timestamp incorrect");
+});
+
+await Check("Overlapping scheduled polls share one in-flight boosting read", async () =>
+{
+    var clock = new ManualClock();
+    int calls = 0;
+    var completion = new TaskCompletionSource<List<BoostRequest>>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var poller = new ShopPoller(() => Task.FromResult(new List<Order>()),
+        () => { calls++; return completion.Task; }, clock);
+    var first = poller.PollRequestsAsync();
+    var second = poller.PollRequestsAsync();
+    Require(calls == 1, "Overlapping timers started duplicate API reads");
+    completion.SetResult(new List<BoostRequest> { request });
+    await Task.WhenAll(first, second);
+    Require(calls == 1, "Waiting timer repeated the completed read before next cadence");
+});
+
+await Check("Slow order read leaves boosting stream free to update", async () =>
+{
+    var clock = new ManualClock();
+    var orderCompletion = new TaskCompletionSource<List<Order>>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var poller = new ShopPoller(() => orderCompletion.Task,
+        () => Task.FromResult(new List<BoostRequest> { request }), clock);
+    var pendingOrders = poller.PollOrdersAsync();
+    var boosting = await poller.PollRequestsAsync();
+    Require(!pendingOrders.IsCompleted, "Slow-order fixture completed too early");
+    Require(boosting.IsFresh && boosting.Items.Single().Id == RequestId, "Slow orders held the boosting stream lock");
+    orderCompletion.SetResult(new List<Order>());
+    await pendingOrders;
+});
+
+await Check("Selected boosting request details use the exact ID and retain label/value content", async () =>
+{
+    using var server = new FakeHandler(message =>
+    {
+        if (IsToken(message)) return Json(Token("token"));
+        Require(message.Method == HttpMethod.Get && message.RequestUri!.AbsolutePath == $"/api/boostingOffers/boostingRequests/{RequestId}", "Wrong selected-request detail route");
+        return Json(JsonSerializer.Serialize(new
+        {
+            id = RequestId,
+            boostingRequestDetails = new { descriptionValues = new[]
+            {
+                new { label = "Current rank", value = "Gold" },
+                new { label = "Desired rank", value = "Diamond" },
+                new { label = "Notes", value = " " }
+            } }
+        }));
+    });
+    string? description = await Client(server).GetRequestDetailsAsync(RequestId);
+    Require(description == "Current rank\nGold\n\nDesired rank\nDiamond", "Request detail fields were mixed or lost");
+});
+
+await Check("Mismatched detail response cannot be attached to the selected buyer request", async () =>
+{
+    using var server = new FakeHandler(message => IsToken(message) ? Json(Token("token"))
+        : Json(JsonSerializer.Serialize(new { id = OtherId, boostingRequestDetails = new { descriptionValues = new[] { new { label = "Details", value = "Other buyer" } } } })));
+    await ExpectApi(async () => { await Client(server).GetRequestDetailsAsync(RequestId); }, false);
+});
+
+await Check("Missing request detail text returns unavailable instead of invented content", async () =>
+{
+    using var server = new FakeHandler(message => IsToken(message) ? Json(Token("token"))
+        : Json(JsonSerializer.Serialize(new { id = RequestId, boostingRequestDetails = new { descriptionValues = Array.Empty<object>() } })));
+    Require(await Client(server).GetRequestDetailsAsync(RequestId) is null, "Missing description was replaced with unverified content");
+});
+
+await Check("Request details permission error is surfaced without cookie fallback or retry", async () =>
+{
+    int reads = 0;
+    using var server = new FakeHandler(message =>
+    {
+        if (IsToken(message)) return Json(Token("token"));
+        reads++;
+        Require(!message.Headers.Contains("Cookie"), "Seller request unexpectedly used browser cookies");
+        return new HttpResponseMessage(HttpStatusCode.Forbidden);
+    });
+    try { await Client(server).GetRequestDetailsAsync(RequestId); throw new InvalidOperationException("Expected forbidden detail read"); }
+    catch (ApiException error) { Require(error.StatusCode == 403 && !error.OutcomeUnknown, "Permission error not preserved"); }
+    Require(reads == 1, "Permission failure retried or used a fallback route");
+});
+
+await Check("Shop connects and reconnects after catalog used a client with no BaseAddress", async () =>
+{
+    int tokenCalls = 0;
+    string cacheFolder = Path.Combine(Path.GetTempPath(), "startup-regression", Guid.NewGuid().ToString("N"));
+    try
+    {
+        using var handler = new FakeHandler(message =>
+        {
+            if (message.RequestUri!.Host == "raw.githubusercontent.com")
+            {
+                Require(message.Headers.Authorization is null, "Public catalog leaked shop authorization");
+                return Json("{\"version\":1,\"currency\":\"USD\",\"items\":[{\"name\":\"Portal\",\"price\":1.25,\"delivery\":\"Hour1\"}]}");
+            }
+            Require(message.RequestUri.Host == "www.eldorado.gg", "Wrong API server");
+            if (IsToken(message)) { tokenCalls++; return Json(Token("token")); }
+            return Json(activePage);
+        });
+        using var sharedHttp = new HttpClient(handler);
+        var prices = new PriceCatalogService(sharedHttp, Path.Combine(cacheFolder, "prices.json"));
+        await prices.RefreshAsync();
+        for (int connection = 0; connection < 2; connection++)
+        {
+            var api = new SellerApi(sharedHttp, () => Task.FromResult(new Credentials("id", "secret")));
+            var rows = await api.GetRequestsAsync();
+            Require(rows.Single().Id == RequestId, "Requests unavailable after reconnect");
+            Require(sharedHttp.BaseAddress is null, "API changed caller HttpClient settings");
+        }
+        await prices.RefreshAsync();
+        Require(tokenCalls == 2 && prices.Current!.Items.Single().Price == 1.25m, "Reconnection or price refresh failed");
+    }
+    finally { if (Directory.Exists(cacheFolder)) Directory.Delete(cacheFolder, true); }
+});
+
+await Check("API can attach to an already started client with an existing base address", async () =>
+{
+    using var handler = new FakeHandler(message => IsToken(message) ? Json(Token("token")) : Json(activePage));
+    using var startedHttp = new HttpClient(handler) { BaseAddress = new Uri("https://example.invalid/") };
+    using var firstResponse = await startedHttp.GetAsync("warmup");
+    var api = new SellerApi(startedHttp, () => Task.FromResult(new Credentials("id", "secret")));
+    Require((await api.GetRequestsAsync()).Count == 1, "Started configured client failed");
+    Require(startedHttp.BaseAddress!.Host == "example.invalid", "Custom API base was modified");
+});
+
+await CatalogChecks.RunAsync();
+Console.WriteLine($"PASS: {passed} regression scenarios + 7 catalog scenarios");
 return;
 
 async Task Check(string name, Func<Task> test)
@@ -351,4 +540,11 @@ sealed class FakeHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : H
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         => Task.FromResult(send(request));
+}
+
+sealed class ManualClock : TimeProvider
+{
+    private DateTimeOffset now = DateTimeOffset.Parse("2026-11-06T00:00:00Z", CultureInfo.InvariantCulture);
+    public override DateTimeOffset GetUtcNow() => now;
+    public void Advance(TimeSpan value) => now += value;
 }
